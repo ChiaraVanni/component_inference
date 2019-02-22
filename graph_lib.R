@@ -1,94 +1,23 @@
 require(tidyverse)
 require(igraph)
-run_louvain <- function(X, graph = graph, convert_options = NULL, community_options = NULL,
-                        community_bin = community_bin, convert_bin = convert_bin, hierarchy_bin = hierarchy_bin) {
-
-  # convert names to numeric
-  graph <- graph %>% activate(nodes) %>% mutate(id = name, name = row_number())
-  # Get convert options
-
-  if (is.null(convert_options)) {
-    convert_options <- ""
-  } else {
-    convert_options <- convert_options
-  }
-
-  # Get community options
-  if (is.null(community_options)) {
-    community_options <- "12345 -l -1 -v"
-  } else {
-    community_options <- community_options
-  }
-
-  # convert files
-  bin_file <- paste("/tmp/", X, "-louvain.bin", sep = "")
-  w_file <- paste("/tmp/", X, "-louvain_w.bin", sep = "")
-
-  # community files
-  tree_file <- paste("/tmp/", X, "-louvain.tree", sep = "")
-  # hierarchy files
-  g_name <- paste("/tmp/", X, ".tsv", sep = "")
-
-  convert_command <- paste(convert_bin, "-i", g_name, "-o", bin_file, "-w", w_file,
-                           convert_options, sep = " ")
-  community_command <- paste(community_bin, bin_file, community_options, "-w",
-                             w_file, ">", tree_file, sep = " ")
-
-  # export file write.graph(graph, g_name, format = 'ncol')
-  data.table::fwrite(graph %>% activate(edges) %>% as_tibble() %>% data.table::as.data.table(),
-                     file = g_name, col.names = F, showProgress = T, sep = " ")
-  cat("Command called: ", convert_command, "\n")
-  system(convert_command)
-  cat("Command called: ", community_command, "\n")
-  system(community_command)
-
-  # guess how many levels do we have:
-  hierarchy_command <- paste(hierarchy_bin, tree_file, "-n", sep = " ")
-  cat("Command called: ", hierarchy_command, "\n")
-  louvain_hier <- system(hierarchy_command, intern = TRUE)
-  louvain_levels <- as.numeric(gsub(pattern = "Number of levels: ", "", louvain_hier[[1]]))
-
-  modules <- vector(mode = "list")
-  mod_louvain <- vector(mode = "list")
-
-  for (i in 1:louvain_levels) {
-    com_file <- paste("/tmp/", X, "-louvain_", i, ".com", sep = "")
-
-    hierarchy_command <- paste(hierarchy_bin, tree_file, "-l", i - 1, ">",
-                               com_file, sep = " ")
-    system(hierarchy_command)
-    modules[[i]] <- read.table(file = com_file, fill = TRUE, stringsAsFactors = F,
-                               sep = " ", header = T) %>% magrittr::set_colnames(c("node", "com"))
-
-    cat(paste("Parsing Louvain communities output for level", i - 1, ":", length(unique(modules[[i]]$com)),
-              "communities detected.\n"))
-    mod_louvain[[i]] <- modules[[i]][match(get.vertex.attribute(graph, "name"),
-                                           modules[[i]]$node), ] %>% dplyr::select(com) %>% .$com
-  }
-
-  # map_file <- paste(out_folder, '/', X, '.map', sep = '')
-
-  return(mod_louvain)
-}
 
 
 # Run MCL clustering ------------------------------------------------------
 
-run_mcl <- function(X, graph = graph, options = NULL, mcl_bin = mcl_bin) {
+run_mcl <- function(X, graph = graph, options = NULL, mcl_bin = mcl_bin, tmp_dir = "/tmp") {
   if (is.null(options)) {
     mcl_options <- "--abc -I 2.0"
   } else {
     mcl_options <- options
   }
   R <- as.character(stringi::stri_rand_strings(1, 10))
-  out_file <- paste("/tmp/", X, "-mcl_", R, ".out", sep = "")
-  g_name <- paste("/tmp/", X, "_", R, ".tsv", sep = "")
+  out_file <- file.path(tmp_dir, paste(X, "-mcl_", R, ".out", sep = ""))
+  g_name <- file.path(tmp_dir, paste(X, "_", R, ".tsv", sep = ""))
   mcl_command <- paste(mcl_bin, g_name, mcl_options, "-o", out_file, "> /dev/null", sep = " ")
-
 
   # convert names to numeric
   graph <- graph %>%
-    as_data_frame(what = "edges") %>%
+    igraph::as_data_frame(what = "edges") %>%
     as_tibble()
 
   data.table::fwrite(graph %>% data.table::as.data.table(),
@@ -109,7 +38,6 @@ run_mcl <- function(X, graph = graph, options = NULL, mcl_bin = mcl_bin) {
 # Parse MCL results -------------------------------------------------------
 
 parse_mcl <- function(X) {
-
   modules <- fread(input = X, sep = "\t", header = FALSE, fill = TRUE) %>% as_tibble()
   cat(paste("Parsing MCL output.", nrow(modules), "communities detected.\n"))
 
@@ -148,20 +76,23 @@ calculate_intra_score_m <- function(G = G) {
 }
 
 contract_graphs <- function(X, G = G) {
-  cat("Filtering graph...")
-  G <- G %>% activate(nodes) %>% inner_join(X$coms %>% rename(name = vertex) %>%
+  msg_sub("Filtering graph...")
+  G <- G %>% activate(nodes) %>% inner_join(X %>% rename(name = vertex) %>%
                                               mutate(name = as.character(name)), by = c(name = "name")) #%>% select(-class, -complete, -partial)
-  cat("done.\nContracting vertices...")
+  cat("done.\n")
+  msg_sub("Contracting vertices...")
   attr <- as.numeric(as.factor(get.vertex.attribute(G, "com")))
   gc <- contract.vertices(G, attr, vertex.attr.comb = list(name = function(x) paste(x, collapse = "|"),
                                                            com = function(x) unique(x),
                                                            archit = function(x) paste(unique(x), collapse = "__"),
                                                            original = function(x) paste(unique(x), collapse = "__")))
-  cat("done.\nSimplifying edges...")
+  cat("done.\n")
+  msg_sub("Simplifying edges...")
   gc <- igraph::simplify(gc, edge.attr.comb = list(weight = function(x) {
     estimate_mode(x)
   }), remove.loops = TRUE, )
-  cat("done...\nCleaning up...")
+  cat("done...\n")
+  msg_sub("Cleaning up...")
   rm(G)
   gc()
   cat("done.\n")
@@ -237,23 +168,10 @@ majority_vote <- function (x, seed = 12345) {
 
 
 
-optimal_mcl <- function(I = I, G = G, Gx = Gx, mcl_cores = 1) {
-  options <- paste("-q x -V all -te", mcl_cores, "--abc -I", I, sep = " ")
+optimal_mcl <- function(I = I, G = G, Gx = Gx, mcl_cores = 1, tmp_dir = "/tmp") {
+  options <- paste("-te", mcl_cores, "--abc -I", I, sep = " ")
   I <- as.character(I)
-
-  g_mcl <- run_mcl(X = "g", graph = Gx, options = options, mcl_bin = mcl_bin)
-  # g_mcl_list[[i]] <- g_mcl_list[[i]][match(get.vertex.attribute(gx, 'name'),
-  # g_mcl_list[[i]]$vertex), ] g_mcl_list[[i]] <- make_clusters(gx,
-  # as.numeric(g_mcl_list[[I]]$com), algorithm = 'MCL', modularity = TRUE)
-  # com_mclX <- paste('com_mcl', I, sep = '') gx <- set.vertex.attribute(graph =
-  # gx, name = eval(com_mclX), index = V(gx), value =
-  # as.character(membership(g_mcl_list[[I]])))
-  G <- G %>% activate(nodes) %>% left_join(g_mcl %>% rename(name = vertex) %>%
-                                             mutate(name = as.character(name)), by = c(name = "name"))
-
-  kwp_intra_scores <- calculate_intra_score_m(G)
-
-  list(coms = g_mcl, intra_scores = kwp_intra_scores)
+  run_mcl(X = "g", graph = Gx, options = options, mcl_bin = mcl_bin, tmp_dir = tmp_dir)
 }
 
 

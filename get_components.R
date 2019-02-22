@@ -30,7 +30,8 @@ cat("\nChecking if all packages are installed...\n\n")
 
 
 needed <- c("igraph", "tidyverse", "pbmcapply", "maditr", "data.table",
-            "tidygraph", "bigreadr", "unixtools")
+            "tidygraph", "bigreadr", "unixtools", "stringi", "foreach",
+            "doSNOW", "itertools", "parallel")
 
 missing_package <- FALSE
 # For loop to run through each of the packages
@@ -63,9 +64,17 @@ system("clear")
 cat("Loading libraries...")
 silent <- suppressMessages(lapply(needed, function(X) {require(X, character.only = TRUE)}))
 rm(silent)
-cat(" done\n")
+cat(" done\n\n")
 
-# Get config file
+# Some functions ----------------------------------------------------------
+
+msg <- function(X){
+  cat(crayon::white(paste0("[",format(Sys.time(), "%T"), "]")), X)
+}
+
+msg_sub <- function(X){
+  cat(crayon::white(paste0("  [",format(Sys.time(), "%T"), "]")), X)
+}
 
 # Script command line options ---------------------------------------------
 
@@ -83,38 +92,20 @@ if (is.null(opt$config)){
   stop("At least one arguments must be supplied (YAML config file).n", call.=FALSE)
 }
 
-cat("Getting config parameters...")
+msg("Getting config parameters...")
 cfg <- config::get(file = opt$config, use_parent = FALSE)
 cat(" done\n")
-
-tmp <- file.path(cfg$wd, "tmp")
-cat(paste0("Creating TMP folder at ", tmp, "..."))
-if (dir.exists(tmp)) unlink(tmp, recursive = TRUE, force = TRUE)
-dir.create(tmp, recursive = TRUE)
-# Set a new teppdir
-set.tempdir(tmp)
-cat("done\n")
 
 # Create a new environment
 lo_env <- new.env()
 
 # Define data.table parameters
-dt_nthreads <- cfg$dt_cores
 options(datatable.optimize=Inf)
-options(datatable.verbose = cfg$verbose)
-# setDTthreads(dt_nthreads)
+options(datatable.verbose = cfg$dt_verbose)
+setDTthreads(cfg$dt_cores)
 # getDTthreads()
 
 
-# library(foreach)
-# library(doSNOW)
-# library(itertools)
-# nproc <- 64
-# cl <- makeCluster(nproc, rscript_args = c("--no-init-file", "--no-site-file", "--no-environ"), outfile = "/scratch/antonio/unk_C_SC/cl_out.log")
-# registerDoSNOW(cl)
-# getDoParWorkers()
-# getDoParRegistered()
-# getDoParName()
 
 # Read data ---------------------------------------------------------------
 
@@ -124,42 +115,58 @@ options(datatable.verbose = cfg$verbose)
 
 # Number of k clusters
 # 1,122,105
-cat("Reading cluster categories...")
-cl_cat <- fread(file = cfg$cl_cat, header = FALSE, showProgress = TRUE)
+msg("Reading cluster categories...")
+cl_cat <- fread(file = cfg$cl_cat, header = FALSE, showProgress = FALSE, nThread = cfg$dt_cores)
 setnames(cl_cat, names(cl_cat), c("cl_name", "category"))
 cat(" done\n")
 
-cat("Reading cluster completeness...")
-cl_compl <- fread(file = cfg$cl_compl, header = TRUE, showProgress = TRUE)
+msg("Reading cluster completeness...")
+cl_compl <- fread(file = cfg$cl_comp, header = TRUE, showProgress = FALSE, nThread = cfg$dt_cores)
 cat(" done\n")
 
-cat("Reading PFAM31 clan information...")
-p_clan <- fread(file = cfg$p_clan, header = FALSE, showProgress = TRUE) %>%
+msg("Reading PFAM31 clan information...")
+p_clan <- fread(file = cfg$p_clan, header = FALSE, showProgress = FALSE, nThread = cfg$dt_cores) %>%
   dt_select(V2, V4) %>%
   setnames(c("V2", "V4"), c("clan", "pfam"))
 cat(" done\n")
 
-cat("Reading simplified domain architecture information...")
-p_doms <- fread(input = cfg$p_doms, header = TRUE, showProgress = TRUE) %>%
+msg("Reading simplified domain architecture information...")
+p_doms <- fread(input = cfg$p_doms, header = TRUE, showProgress = FALSE, nThread = cfg$dt_cores) %>%
   mutate(cl_name = as.character(cl_name))
-cat(" done\n")
+cat(" done\n\n")
 
 k_comp <- p_doms %>% dt_filter(cl_name %in% (cl_cat %>% dt_filter(category == "K") %>% .$cl_name))
 
 
-lo_env$k_hhblits_all <- big_fread1("/scratch/antonio/unk_C_SC/data/k_hhblits.tsv",
-                                   every_nlines = 500e6,
+tmp <- file.path(cfg$wd, "tmp")
+msg(paste0("Creating TMP folder at ", tmp, "..."))
+if (dir.exists(tmp)) unlink(tmp, recursive = TRUE, force = TRUE)
+dir.create(tmp, recursive = TRUE)
+# Set a new teppdir
+set.tempdir(tmp)
+cat("done\n")
+
+time_string <- paste(format(Sys.Date()), format(Sys.time(), "%H%M%S"), sep = "-")
+results <- file.path(cfg$wd, time_string)
+msg(paste0("Creating RESULTS folder at ", results, "..."))
+if (dir.exists(results)) unlink(results, recursive = TRUE, force = TRUE)
+dir.create(results, recursive = TRUE)
+cat("done\n\n")
+
+msg("Reading HHBLITS all-vs-all results...")
+lo_env$k_hhblits_all <- big_fread1(cfg$hhblits_results,
+                                   print_timings = FALSE,
+                                   every_nlines = 2e9,
                                    data.table = TRUE,
                                    .combine = list,
-                                   nThread = 78,
-                                   verbose = TRUE,
+                                   nThread = cfg$dt_cores,
                                    header = FALSE
 )
-
 k_hhblits_all_nrow <- map(unlist(lo_env$k_hhblits_all, recursive = FALSE), nrow) %>% unlist() %>% sum()
-cat(paste("Read", scales::comma(k_hhblits_all_nrow), "lines\n"))
+cat(paste(" Read", green(scales::comma(k_hhblits_all_nrow)), "entries\n"))
 
 # Let's filter for prob >= 50, and cov >= 0.6
+msg("Filtering HHBLITS all-vs-all results with P>=50 and cov > 0.6...")
 lo_env$k_hhblits <-  data.table::rbindlist(map(unlist(lo_env$k_hhblits_all, recursive = FALSE), function(X){
   X <- X %>% dt_filter(V1 != V2, V3 >= 50, V13 > 0.6, V14 > 0.6)
   setnames(X, names(X),
@@ -170,20 +177,17 @@ lo_env$k_hhblits <-  data.table::rbindlist(map(unlist(lo_env$k_hhblits_all, recu
                           cl_name2 = as.character(cl_name2),
                           score_col = Score/Cols)
 }))
-
 # How many clusters do we have (removed self-hits)
 # 1,122,105
 # 1,100,297 p50;c0.6
 unique_hhblits_k_cl <- c(lo_env$k_hhblits$cl_name1, lo_env$k_hhblits$cl_name2) %>% unique()
-length(unique_hhblits_k_cl)
+cat(paste0(" Found ", scales::comma(length(unique_hhblits_k_cl)), " clusters\n"))
 
 # We are missing 21,808
 # Which ones
-setdiff(cl_cat %>% dt_filter(category == "K") %>% .$cl_name, unique_hhblits_k_cl) %>% length()
-
 # Find missing clusters ---------------------------------------------------
+msg("Identifying missing clusters...")
 missing_ids <- setdiff(cl_cat %>% dt_filter(category == "K") %>% .$cl_name, unique_hhblits_k_cl)
-
 lo_env$k_hhblits_missing <-  data.table::rbindlist(map(unlist(lo_env$k_hhblits_all, recursive = FALSE), function(X){
   X <- X %>% dt_filter(V1 %in% missing_ids | V2 %in% missing_ids) %>%
     dt_filter(V1 != V2)
@@ -195,9 +199,11 @@ lo_env$k_hhblits_missing <-  data.table::rbindlist(map(unlist(lo_env$k_hhblits_a
                           cl_name2 = as.character(cl_name2),
                           score_col = Score/Cols)
 }))
+cat(paste0("Found ", scales::comma(length(missing_ids))), "clusters missing\n")
+
 
 # Prepare data for network analysis ---------------------------------------
-
+msg("Inferring graph from HHBLITS results...")
 lo_env$k_hhb_bh_score <- lo_env$k_hhblits %>% dt_select(cl_name1, cl_name2, score_col) %>% as_tibble()
 
 k_hh_g <- lo_env$k_hhblits %>%
@@ -208,100 +214,179 @@ k_hh_g <- lo_env$k_hhblits %>%
   igraph::simplify(remove.multiple = TRUE, remove.loops = TRUE, edge.attr.comb = list("max")) %>%
   as_tbl_graph()
 
-vcount(k_hh_g)
-vcount(k_hh_g %>% filter(node_is_isolated()))
-
 k_hh_g <- k_hh_g %>%
   activate(nodes) %>%
   #select(-archit) %>%
-  inner_join(k_comp %>% as_tibble() %>% rename(name = cl_name) %>% mutate(name = as.character(name))) %>%
+  inner_join(k_comp %>% as_tibble() %>% rename(name = cl_name) %>% mutate(name = as.character(name)) %>% select(name, archit, original), by = "name") %>%
   filter(!node_is_isolated())
 
-
+cat(paste0(" Graph contains ", scales::comma(vcount(k_hh_g)), " vertices and ", scales::comma(ecount(k_hh_g)), " edges\n"))
 
 # Identify communities using MCL ------------------------------------------
-source("/scratch/antonio/unk_C_SC/graph_lib.R")
+source(cfg$graph_lib)
 
-gx <- k_hh_g
+if (cfg$k_g_mcl_list != ""){
+  msg("Loading already computed MCL clusters...")
+  load(cfg$k_g_mcl_list)
+  inflation_list <- seq(cfg$mcl_inflation_min, cfg$mcl_inflation_max, cfg$mcl_inflation_step)
+  cat(" done\n")
+}else{
+  msg("Preparing graph for MCL clustering...")
+  gx <- k_hh_g
+  lo_env$w <- E(gx)$weight
+  lo_env$w  <- lo_env$w - min(lo_env$w ) + 0.001
+  E(gx)$weight <- lo_env$w
+  cat(" done\n")
 
-lo_env$w <- E(gx)$weight
-lo_env$w  <- lo_env$w - min(lo_env$w ) + 0.001
+  msg(paste0("Running MCL clustering with inflation values from ", cfg$mcl_inflation_min, " to ", cfg$mcl_inflation_max, " with ", cfg$mcl_inflation_step, " steps...\n"))
+  inflation_list <- seq(cfg$mcl_inflation_min, cfg$mcl_inflation_max, cfg$mcl_inflation_step)
+  mcl_bin <- cfg$mcl_bin
+  k_g_mcl_list <- pbmcapply::pbmclapply(inflation_list,
+                                        optimal_mcl,
+                                        G = k_hh_g,
+                                        mcl_cores = cfg$mcl_cores,
+                                        ignore.interactive = TRUE,
+                                        Gx = gx,
+                                        max.vector.size = 1e+07,
+                                        mc.cores = cfg$mcl_jobs,
+                                        mc.cleanup = TRUE,
+                                        mc.silent = TRUE,
+                                        tmp_dir = tmp)
 
-E(gx)$weight <- lo_env$w
+  #k_g_mcl_list <- lapply(inflation_list, optimal_mcl, G = k_hh_g, Gx = gx, mcl_cores = cfg$mcl_cores, tmp_dir = tmp)
+  names(k_g_mcl_list) <- inflation_list
 
-inflation_list <- seq(1.2, 3, 0.1)
-mcl_bin <- "mcl"
-k_g_mcl_list <- pbmcapply::pbmclapply(inflation_list, optimal_mcl, G = k_hh_g, mcl_cores = 32,
-                                      Gx = gx, max.vector.size = 1e+07, mc.cores = 2, mc.cleanup = TRUE, mc.silent = TRUE)
-
-names(g_cml_list) <- inflation_list
-#
-#save(g_cml_list, file = '/scratch/antonio/unk_C_SC/g_cml_list_c0.6_p50_all.Rda')
-inflation_list <- seq(1.2, 3, 0.1)
-load(file = '/scratch/antonio/unk_C_SC/g_cml_list_c0.6_p50_all.Rda')
-names(g_cml_list) <- inflation_list
+  k_g_mcl_list_file <- file.path(results, paste0("k_g_mcl_list_", time_string, ".Rda"))
+  msg(paste0("Saving computed MCL communities in ", k_g_mcl_list_file, "..."))
+  save(k_g_mcl_list, file = k_g_mcl_list_file, compress = FALSE)
+  cat(" done\n")
+}
 
 # Contract identified communities -----------------------------------------
-k_gc <- pbmcapply::pbmclapply(g_cml_list, contract_graphs, G = k_hh_g, max.vector.size = 3e+09,  mc.cores = 19)
-names(k_gc) <- inflation_list
-# save(k_gc, file = "/scratch/antonio/unk_C_SC/k_gc.Rda")
-load(file = "/scratch/antonio/unk_C_SC/k_gc.Rda", verbose = TRUE)
-# Get some stats of the different communities -----------------------------
-# Modularity
-k_hh_g_modularity <- map_df(g_cml_list, function(X){
+if (cfg$k_gc != ""){
+  msg("Loading already contracted MCL communities...")
+  load(cfg$k_gc)
+  cat(" done\n")
+}else{
+  msg("Contracting MCL communities...\n")
+  k_gc <- pbmcapply::pbmclapply(k_g_mcl_list,
+                                contract_graphs,
+                                G = k_hh_g,
+                                max.vector.size = 3e+09,
+                                mc.cores = cfg$max_gc_jobs,
+                                mc.cleanup = TRUE,
+                                mc.silent = TRUE,
+                                ignore.interactive = TRUE
+  )
+  names(k_gc) <- inflation_list
+  msg("Contracting MCL communities... done\n")
+
+  k_gc_file <- file.path(results, paste0("k_gc_", time_string, ".Rda"))
+  msg(paste0("Saving contracted MCL communities results in ", k_gc_file, "..."))
+  save(k_gc, file = k_gc_file, compress = FALSE)
+  cat(" done\n")
+}
+
+msg("Computing modularity for each MCL community result...")
+k_hh_g_modularity <- map_df(k_g_mcl_list, function(X){
   vnames <- V(k_hh_g)$name
-  tibble(modularity = modularity(k_hh_g, X$coms[match(vnames,X$coms$vertex),]$com))
+  tibble(modularity = modularity(k_hh_g, X[match(vnames,X$vertex),]$com))
 }, .id = "inflation")
+cat(" done\n")
 
 # Number of different DAs in each MCL cluster
-k_hh_gc_da_sg <- lapply(k_gc, function(X) {
-  ppbmmclapply(X$da$com, evaluate_da_components, da = X$da, mc.cores = 78) %>%
-    bind_rows() %>% inner_join(X$da, by = "com")
-})
-names(k_hh_gc_da_sg) <- inflation_list
-#save(k_hh_gc_da_sg, file = "/scratch/antonio/unk_C_SC/k_hh_gc_da_sg.Rda", compress = FALSE)
-load(file = "/scratch/antonio/unk_C_SC/k_hh_gc_da_sg.Rda", verbose = TRUE)
+if (cfg$k_gc_da_sg != ""){
+  msg("Loading already evaluated MCL results...")
+  load(cfg$k_gc_da_sg)
+  cat(" done\n")
+}else{
+  msg("Evaluating MCL communities...\n")
+  k_gc_da_sg <- lapply(k_gc, function(X) {
+    pbmclapply(X$da$com,
+               evaluate_da_components,
+               da = X$da,
+               mc.cores = cfg$dt_cores,
+               max.vector.size = 3e+09,
+               mc.cleanup = TRUE,
+               mc.silent = TRUE,
+               ignore.interactive = TRUE
+    ) %>%
+      bind_rows() %>% inner_join(X$da, by = "com")
+  })
+  names(k_gc_da_sg) <- inflation_list
+  msg("Evaluating MCL communities... done\n")
+
+  k_gc_da_sg_file <- file.path(results, paste0("k_gc_da_sg_", time_string, ".Rda"))
+  msg(paste0("Saving evaluated MCL communities results in ", k_gc_da_sg_file, "..."))
+  save(k_gc_da_sg, file = k_gc_da_sg_file, compress = FALSE)
+  cat(" done\n")
+}
 
 # Entropy
-k_hh_g_da <- k_hh_g %>%
-  activate(nodes) %>%
-  as_tibble() %>%
-  separate_rows(archit, sep = "__") %>%
-  as.data.table()
+if (cfg$k_gc_entropy != ""){
+  msg("Loading already calculated entropy results...")
+  load(cfg$k_gc_entropy)
+  cat(" done\n")
+}else{
+  msg("Calculating MCL communities entropy... (Patience, it takes a while)\n")
+  k_hh_g_da <- k_hh_g %>%
+    activate(nodes) %>%
+    as_tibble() %>%
+    separate_rows(archit, sep = "__") %>%
+    as.data.table()
 
-gc()
-k_hh_gc_com_entropy <- lapply(k_hh_gc_da_sg, function(X) {
-  pbmcapply::pbmclapply(X$com, FUN = evaluate_component_entropy, g = k_hh_g_da, df = X,  mc.cores = 32, max.vector.size = 3e+08) %>% bind_rows()
-})
+  k_gc_entropy <- lapply(k_gc_da_sg, function(X) {
+    pbmcapply::pbmclapply(X$com,
+                          FUN = evaluate_component_entropy,
+                          g = k_hh_g_da,
+                          df = X,
+                          mc.cores = cfg$entropy_cores,
+                          max.vector.size = 3e+09,
+                          mc.cleanup = TRUE,
+                          mc.silent = TRUE,
+                          ignore.interactive = TRUE) %>% bind_rows()
+  })
+  names(k_gc_entropy) <- inflation_list
+  msg("Calculating MCL communities entropy... done\n")
 
-#save(k_hh_gc_com_entropy, file = "/scratch/antonio/unk_C_SC/k_hh_gc_com_entropy.Rda")
-load(file = "/scratch/antonio/unk_C_SC/k_hh_gc_com_entropy.Rda")
+  k_gc_entropy_file <- file.path(results, paste0("k_gc_entropy_", time_string, ".Rda"))
+  msg(paste0("Saving evaluated MCL communities results in ", k_gc_entropy_file, "..."))
+  save(k_gc_entropy, file = k_gc_entropy_file, compress = FALSE)
+  cat(" done\n")
+}
 
-k_hh_gc_com_entropy_summary <- map_df(k_hh_gc_com_entropy, function(X){
+msg("Calculating MCL entropy summaries...")
+k_gc_entropy_summary <- map_df(k_gc_entropy, function(X){
   X %>% mutate(e_0 = ifelse(entropy == 0, "eq", "gt")) %>%
     group_by(e_0) %>%
     count() %>%
     ungroup() %>%
     mutate(p = n/sum(n))
 }, .id = "inflation")
+cat(" done\n")
 
+# Calculate nter and intra score modes
+msg("Calculating inter/intra MCL communities score-per-column mode values...\n")
 
-# Inter and intra score modes
-k_hh_g_dt <- k_hh_g %>% as_data_frame(what="edges") %>% rename(cl_name1 = from, cl_name2 = to, score_col = weight) %>% as.data.table()
-k_orig_hh_mode <- pbmcapply::pbmclapply(g_cml_list, function(X){
+k_hh_g_dt <- k_hh_g %>%
+  igraph::as_data_frame(what="edges") %>%
+  rename(cl_name1 = from, cl_name2 = to, score_col = weight) %>%
+  as.data.table()
+
+k_orig_hh_mode <- pbmcapply::pbmclapply(k_g_mcl_list, function(X){
   k_hh_g_dt %>%
-    dt_left_join(X$coms %>% dt_select(vertex, com) %>% dt_mutate(com = as.character(com), vertex = as.character(vertex)) %>% rename(cl_name1 = vertex) %>% unique() %>% as.data.table, by = "cl_name1") %>%
-    dt_left_join(X$coms %>% dt_select(vertex, com) %>% dt_mutate(com = as.character(com), vertex = as.character(vertex)) %>% rename(cl_name2 = vertex) %>% unique() %>% as.data.table, by = "cl_name2") %>%
+    dt_left_join(X %>% dt_select(vertex, com) %>% dt_mutate(com = as.character(com), vertex = as.character(vertex)) %>% rename(cl_name1 = vertex) %>% unique() %>% as.data.table, by = "cl_name1") %>%
+    dt_left_join(X %>% dt_select(vertex, com) %>% dt_mutate(com = as.character(com), vertex = as.character(vertex)) %>% rename(cl_name2 = vertex) %>% unique() %>% as.data.table, by = "cl_name2") %>%
     dt_filter(com.x == com.y) %>% mutate(com = com.x) %>% group_by(com) %>% summarise(mode = estimate_mode(score_col))
-}, mc.cores = 19)
+}, mc.cores = cfg$max_gc_jobs, max.vector.size = 3e+09, mc.cleanup = TRUE, mc.silent = TRUE, ignore.interactive = TRUE)
 
 com_orig_intra_score <- map_df(k_orig_hh_mode, function(X){tibble(mode = estimate_mode(X$mode))}, .id = "inflation")
-com_orig_inter_score <- map_df(k_gc, function(X){ tibble(mode = estimate_mode(E(X$graph)$weight))}, .id = "inflation")
+com_orig_inter_score <- map_df(k_gc, function(X){tibble(mode = estimate_mode(E(X$graph)$weight))}, .id = "inflation")
 
 k_orig_hh_mode_summary <- com_orig_intra_score %>%
   mutate(class = "intra") %>%
   bind_rows(com_orig_inter_score %>% mutate(class = "inter"))
-
+msg("Calculating inter/intra MCL communities score-per-column mode values... done\n\n")
 
 # Get non-redundant set of DAs
 # library(zoo)
@@ -314,64 +399,93 @@ k_orig_hh_mode_summary <- com_orig_intra_score %>%
 
 # Prefilter combinations that are too distant
 # Get list of domains used during the MCL clustering
-p_doms %>% filter(cl_name %in% unique_hhblits_k_cl)
+d <- p_doms %>% select(exp_rep) %>% unique() %>% as.data.table()
 
-d <- p_doms %>% select(class, exp_rep) %>% unique() %>% as.data.table()
-lo_env$da_dist <- stringdist::stringdistmatrix(d$exp_rep, useNames = TRUE, method = "cosine", q = 3, nthread = 64) %>%
+if (cfg$da_dist != ""){
+  msg("Loading already calculated domain architectures distances...")
+  lo_env$da_dist <- fread(input = cfg$da_dist, header = TRUE, showProgress = FALSE, nThread = cfg$dt_cores)
+  cat(" done\n")
+}else{
+msg("Generating a non-redundant set of domain architectures...\n")
+n_comp <- (nrow(d)*(nrow(d) - 1))/2
+
+msg(paste("Calculating", scales::comma(n_comp),"pairwise domain architectures", "distances using", red("cosine"), "distance with a", red("q-gram of 3...")))
+lo_env$da_dist <- stringdist::stringdistmatrix(d$exp_rep, useNames = TRUE, method = "cosine", q = 3, nthread = cfg$dt_cores) %>%
   broom::tidy() %>%
   as.data.table()
-#fwrite(lo_env$da_dist, file = "/scratch/antonio/unk_C_SC/da_dist.tsv", col.names = TRUE)
-lo_env$da_dist <- fread(input = "/scratch/antonio/unk_C_SC/da_dist.tsv", header = TRUE)
+cat(" done\n")
 
-da_dist_0.9 <- lo_env$da_dist %>% dt_filter(distance < 0.9) %>% dt_arrange(-distance)
-
-d[, n := seq_len(nrow(d))]
-
-d.2 <- da_dist_0.9 %>% as_tibble() %>% mutate(idx1 = plyr::mapvalues(item1, from = d$exp_rep, to = d$n),
-                                              idx2 = plyr::mapvalues(item2, from = d$exp_rep, to = d$n))
-
-d.2 %>% filter(is.na(item1))
-# Remove partial DAs that are contained in larger architectures
-
-
-#iterations <- 1000
-pb <- txtProgressBar(max = nproc, style = 3)
-progress <- function(n) setTxtProgressBar(pb, n)
-opts <- list(progress = progress)
-
-d.2 <- d.2 %>% as.data.table()
-
-pb <- txtProgressBar(min = 0, max = nrow(d.2), style = 3)
-k_das_refinement <- d.2[, c("n1", "n2", "V1_t", "V2_t", "DET") := {setTxtProgressBar(pb, .GRP);
-  n1 = str_count(item1, pattern = "\\|");
-  n2 = str_count(item2, pattern = "\\|");
-  V1_t = ifelse(str_count(item1, pattern = "\\|") <= str_count(item2, pattern = "\\|"), as.character(item1), as.character(item2));
-  V2_t = ifelse(str_count(item1, pattern = "\\|") > str_count(item2, pattern = "\\|"), as.character(item1), as.character(item2));
-  DET = ifelse(grepl(V1_t, V2_t, fixed = TRUE), TRUE, FALSE); list(n1, n2, V1_t, V2_t, DET)}, seq_len(nrow(d.2))]
-close(pb)
-
-d.2
-
-k_das_refinement <- foreach(i=isplitRows(d.2, chunks=4), .combine = bind_rows, .packages = c("tidyverse", "igraph", "tidygraph", "future", "furrr", "stringr"), .options.snow = opts) %do% {
-  plan(multicore, workers = 64)
-  future_pmap_dfr(i %>% as_tibble(),
-                  ~tibble(idx1 = ..4,
-                          idx2 = ..5,
-                          item1 = ..1,
-                          item2 = ..2,
-                          n1 = str_count(item1, pattern = "\\|"),
-                          n2 = str_count(item2, pattern = "\\|"),
-                          V1_t = ifelse(str_count(item1, pattern = "\\|") <= str_count(item2, pattern = "\\|"), as.character(item1), as.character(item2)),
-                          V2_t = ifelse(str_count(item1, pattern = "\\|") > str_count(item2, pattern = "\\|"), as.character(item1), as.character(item2)),
-                          DET = ifelse(grepl(V1_t, V2_t, fixed = TRUE), TRUE, FALSE)), .progress = TRUE)
-  #strn = ecount(graph.intersection(c[[..4]] %>% igraph::simplify(), c[[..5]] %>% igraph::simplify()))))
-
+da_dist_file <- file.path(results, paste0("da_dist_", time_string, ".tsv"))
+msg(paste0("Saving pairwise domain architectures distances in ", da_dist_file, "..."))
+fwrite(lo_env$da_dist, file = da_dist_file, col.names = TRUE, showProgress = FALSE)
+cat(" done\n")
 }
 
-close(pb)
-stopCluster(cl)
+msg("Filtering pairwise distances < 0.9...")
+da_dist_0.9 <- lo_env$da_dist %>% dt_filter(distance < 0.9) %>% dt_arrange(-distance)
+d[, n := seq_len(nrow(d))]
+d.2 <- da_dist_0.9 %>%
+  as_tibble() %>%
+  mutate(idx1 = plyr::mapvalues(item1, from = d$exp_rep, to = d$n, warn_missing = FALSE),
+         idx2 = plyr::mapvalues(item2, from = d$exp_rep, to = d$n, warn_missing = FALSE)) %>%
+  as.data.table()
 
-save(k_das_refinement, file = "/scratch/antonio/unk_C_SC/k_das_refinement.Rda", compress = FALSE)
+cat(" done\n")
+
+#iterations <- 1000
+# pb <- txtProgressBar(max = nproc, style = 3)
+# progress <- function(n) setTxtProgressBar(pb, n)
+# opts <- list(progress = progress)
+# d.2 <- d.2 %>% as.data.table()
+
+# pb <- txtProgressBar(min = 0, max = nrow(d.2), style = 3)
+# k_das_refinement <- d.2[, c("n1", "n2", "V1_t", "V2_t", "DET") := {setTxtProgressBar(pb, .GRP);
+#   n1 = str_count(item1, pattern = "\\|");
+#   n2 = str_count(item2, pattern = "\\|");
+#   V1_t = ifelse(str_count(item1, pattern = "\\|") <= str_count(item2, pattern = "\\|"), as.character(item1), as.character(item2));
+#   V2_t = ifelse(str_count(item1, pattern = "\\|") > str_count(item2, pattern = "\\|"), as.character(item1), as.character(item2));
+#   DET = ifelse(grepl(V1_t, V2_t, fixed = TRUE), TRUE, FALSE); list(n1, n2, V1_t, V2_t, DET)}, seq_len(nrow(d.2))]
+# close(pb)
+
+
+if (cfg$k_das_refinement != ""){
+  msg("Loading domain architectures refinement results...")
+  load(cfg$k_das_refinement)
+  cat(" done\n")
+}else{
+  msg("Starting SNOW cluster...")
+  cl <- makeCluster(cfg$das_refinement_cores, rscript_args = c("--no-init-file", "--no-site-file", "--no-environ"))
+  registerDoSNOW(cl)
+  cat( " done\n")
+
+  msg("Startind domain architectures refinement...\n")
+  pb <- txtProgressBar(max = cfg$das_refinement_cores, style = 3)
+  progress <- function(n) setTxtProgressBar(pb, n)
+  opts <- list(progress = progress)
+
+  k_das_refinement <- foreach(i=isplitRows(d.2, chunks=4), .combine = bind_rows, .packages = c("tidyverse", "igraph", "tidygraph"), .options.snow = opts) %dopar% {
+    pmap_dfr(i %>% as_tibble(),
+             ~tibble(idx1 = ..4,
+                     idx2 = ..5,
+                     item1 = ..1,
+                     item2 = ..2,
+                     n1 = str_count(item1, pattern = "\\|"),
+                     n2 = str_count(item2, pattern = "\\|"),
+                     V1_t = ifelse(str_count(item1, pattern = "\\|") <= str_count(item2, pattern = "\\|"), as.character(item1), as.character(item2)),
+                     V2_t = ifelse(str_count(item1, pattern = "\\|") > str_count(item2, pattern = "\\|"), as.character(item1), as.character(item2)),
+                     DET = ifelse(grepl(V1_t, V2_t, fixed = TRUE), TRUE, FALSE)), .progress = TRUE)
+    }
+
+  close(pb)
+  stopCluster(cl)
+  msg("Startind domain architectures refinement... done\n")
+  k_das_refinement_file <- file.path(results, paste0("k_das_refinement_", time_string, ".Rda"))
+  msg(paste0("Saving domain architectures refinement results in ", k_gc_entropy_file, "..."))
+  save(k_das_refinement, file = k_das_refinement_file, compress = FALSE)
+  cat(" done\n")
+}
+
+
 #load(file = "/scratch/antonio/unk_C_SC/k_das_refinement.Rda", verbose = TRUE)
 # Domains that are part of a larger domain
 sub_da <- k_das_refinement  %>% dt_filter(DET == TRUE) %>% dt_select(V1_t) %>% unique()
