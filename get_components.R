@@ -797,7 +797,7 @@ if(k_correct){
   msg(paste0("All clusters assigned: ", green(k_correct), "\n"))
 }else{
   msg(paste0("All clusters assigned: ", red(k_correct), "\n"))
-  msg("Something went wrong... quitting!")
+  msg("Something went wrong... quitting\n!")
   quit()
 }
 
@@ -1116,7 +1116,7 @@ if(kwp_correct){
   msg(paste0("All clusters assigned: ", green(kwp_correct), "\n"))
 }else{
   msg(paste0("All clusters assigned: ", red(kwp_correct), "\n"))
-  msg("Something went wrong... quitting!")
+  msg("Something went wrong... quitting\n!")
   quit()
 }
 
@@ -1422,12 +1422,12 @@ if (gu_mids_l > 0){
 msg(paste0("We have been obtained ", scales::comma(gu_n_comp), " from ", scales::comma(gu_n_clus), " clusters\n"))
 
 # Do we have all components
-gu_correct <- length(cl_cat %>% dt_filter(category == "KWP") %>% .$cl_name) == gu_n_clus
+gu_correct <- length(cl_cat %>% dt_filter(category == "GU") %>% .$cl_name) == gu_n_clus
 if(gu_correct){
   msg(paste0("All clusters assigned: ", green(gu_correct), "\n"))
 }else{
   msg(paste0("All clusters assigned: ", red(gu_correct), "\n"))
-  msg("Something went wrong... quitting!")
+  msg("Something went wrong... quitting\n!\n")
   quit()
 }
 
@@ -1740,7 +1740,7 @@ if(eu_correct){
   msg(paste0("All clusters assigned:", green(eu_correct), "\n"))
 }else{
   msg(paste0("All clusters assigned:", red(eu_correct), "\n"))
-  msg("Something went wrong... quitting!")
+  msg("Something went wrong... quitting\n!")
   quit()
 }
 
