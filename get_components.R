@@ -1192,6 +1192,8 @@ if (cfg$gu_g_mcl_list != ""){
 
   E(gx)$weight <- w
 
+  cat(" done\n")
+
   msg(paste0("Running MCL clustering with inflation values from ", cfg$mcl_inflation_min, " to ", cfg$mcl_inflation_max, " with ", cfg$mcl_inflation_step, " steps...\n"))
   inflation_list <- seq(cfg$mcl_inflation_min, cfg$mcl_inflation_max, cfg$mcl_inflation_step)
   mcl_bin <- cfg$mcl_bin
@@ -1411,7 +1413,7 @@ if (gu_mids_l > 0){
 }else{
   msg(paste0("Trying to assign ", scales::comma(gu_mids_l), " missing clusters to existing components...", red("Skipped"), "\n"))
   msg("All clusters already assigned to a component\n")
-  gu_components <- gu_mcl_coms %>% rename(cl_name = vertex) %>% mutate(cl_name = as.character(cl_name)) %>% select(cl_name, com)) %>% unique()
+  gu_components <- gu_mcl_coms %>% rename(cl_name = vertex) %>% mutate(cl_name = as.character(cl_name)) %>% select(cl_name, com) %>% unique()
   gu_n_comp <- gu_components$com %>% unique() %>% length()
   gu_n_clus <-  gu_components$cl_name %>% unique() %>% length()
   cat(" done\n")
@@ -1501,6 +1503,7 @@ if (cfg$eu_g_mcl_list != ""){
   w <- w - min(w) + 0.001
 
   E(gx)$weight <- w
+  cat(" done\n")
 
   msg(paste0("Running MCL clustering with inflation values from ", cfg$mcl_inflation_min, " to ", cfg$mcl_inflation_max, " with ", cfg$mcl_inflation_step, " steps...\n"))
   inflation_list <- seq(cfg$mcl_inflation_min, cfg$mcl_inflation_max, cfg$mcl_inflation_step)
